@@ -13,19 +13,18 @@ API_ID = 31483914
 API_HASH = '1962ae18860f8433f4ecfcfa24c4e2e0'
 SHEET_URL = 'https://docs.google.com/spreadsheets/d/15MtSL0NZRbPCP9P_0LanlORFm9MYUVhk4F0LzaM9Rlw/edit'
 
-st.set_page_config(page_title="보안 뉴스 수집기", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="24/7 뉴스 수집기", layout="wide", page_icon="🛡️")
 
+# 기본 채널 목록에서 newsguy 제외
 if 'channel_list' not in st.session_state:
     st.session_state.channel_list = [
         '시그널리포트', '만담채널', 'AWAKE', 
-        '정부정책 알리미', 'newsguy', 'Signal Search', 'Seeking Signal'
+        '정부정책 알리미', 'Signal Search', 'Seeking Signal'
     ]
 
-# 1. 클라이언트 생성 방식 변경 (루프 고정 제거)
 @st.cache_resource
 def get_client():
     session_str = st.secrets["TELEGRAM_SESSION"]
-    # 루프를 명시적으로 지정하지 않고 세션 문자열만 사용
     return TelegramClient(StringSession(session_str), API_ID, API_HASH)
 
 def extract_link(text):
@@ -38,6 +37,7 @@ def extract_link(text):
 
 st.title("🛡️ 24/7 무중단 뉴스 수집기")
 
+# 사이드바 채널 관리
 with st.sidebar:
     st.header("🛠 채널 관리")
     new_ch = st.text_input("추가할 채널명:")
@@ -45,7 +45,8 @@ with st.sidebar:
         st.session_state.channel_list.append(new_ch)
         st.rerun()
     st.write("---")
-    selected_names = [name for name in st.session_state.channel_list if st.checkbox(name, value=True, key=f"ch_{name}")]
+    # 체크박스 상태 변경 시 즉시 반영되도록 구성
+    selected_names = [name for name in st.session_state.channel_list if st.checkbox(name, value=True, key=f"v3_{name}")]
 
 status_ui = st.empty()
 
@@ -58,18 +59,15 @@ async def start_monitoring():
         
         client = get_client()
         
-        # [핵심] 현재 실행 중인 루프에 연결
+        # 연결 시도 및 루프 체크
         if not client.is_connected():
             await client.connect()
         
-        # 세션 유효성 확인 및 시작
         if not await client.is_user_authorized():
-            status_ui.error("❌ 텔레그램 세션이 만료되었습니다. 다시 세션을 추출하세요.")
+            status_ui.error("❌ 텔레그램 세션 만료")
             return
 
-        status_ui.info("🔍 채널 목록 스캔 중...")
         dialogs = await client.get_dialogs()
-        
         target_ids = []
         for name in selected_names:
             for d in dialogs:
@@ -77,7 +75,7 @@ async def start_monitoring():
                     target_ids.append(d.id)
                     break
         
-        # 기존 핸들러 초기화
+        # 기존 핸들러 제거 후 새로 등록
         client.list_event_handlers().clear()
 
         @client.on(events.NewMessage(chats=target_ids))
@@ -96,29 +94,33 @@ async def start_monitoring():
                     worksheet.insert_row(["날짜", "제목", "링크"], 1)
                 
                 worksheet.insert_row([date, title, link], 2)
-                st.toast(f"📥 {clean_title} 수집 성공")
+                st.toast(f"📥 {clean_title} 수집!")
             except: pass
 
-        status_ui.success(f"📡 {len(target_ids)}개 채널 실시간 감시 가동 중")
+        status_ui.success(f"📡 {len(target_ids)}개 채널 실시간 감시 중")
         await client.run_until_disconnected()
-    except Exception as e:
-        # 특정 에러(Event loop closed) 발생 시 재연결 시도 로직
-        if "closed" in str(e).lower():
-            st.rerun()
-        status_ui.error(f"❌ 오류 발생: {e}")
 
-# [자동 실행 로직 개선]
+    except Exception as e:
+        if "loop" in str(e).lower():
+            # 루프 에러 발생 시 세션 초기화 후 재실행 유도
+            st.cache_resource.clear()
+            st.rerun()
+        status_ui.error(f"❌ 오류: {e}")
+
+# 실행 로직
 if selected_names:
     try:
-        # 기존 루프를 가져오거나 없으면 새로 만듦
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(start_monitoring())
-    except Exception as e:
-        if "already running" in str(e).lower():
-            # 이미 루프가 도는 중이면 start_monitoring 직접 호출
+        # 현재 실행 중인 루프가 있는지 확인하고 처리
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # 이미 돌아가고 있다면 태스크로 등록
             asyncio.create_task(start_monitoring())
         else:
-            st.error(f"비동기 실행 오류: {e}")
+            loop.run_until_complete(start_monitoring())
+    except RuntimeError:
+        # 새 루프 생성 및 강제 실행
+        new_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(new_loop)
+        new_loop.run_until_complete(start_monitoring())
 else:
-    status_ui.warning("사이드바에서 수집할 채널을 하나 이상 선택해 주세요.")
+    status_ui.warning("채널을 선택해 주세요.")
